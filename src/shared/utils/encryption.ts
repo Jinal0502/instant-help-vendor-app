@@ -1,5 +1,5 @@
 import { randomBytes, createCipheriv, createDecipheriv } from 'crypto';
-import { config } from '@config/index';
+import { config } from '../../config/index';
 
 // Key must be a 64-char hex string (32 bytes) in ENCRYPTION_KEY env var
 const KEY = Buffer.from(config.encryption.key, 'hex');

@@ -1,10 +1,10 @@
 import { Request, Response } from 'express';
 
-import { AuthService } from './auth.service';
+import { AuthService }   from './auth.service';
 import { sendSuccess, sendCreated } from '../../shared/utils/Response';
-import { asyncHandler } from '../../shared/utils/asyncHandler';
+import { asyncHandler }  from '../../shared/utils/asyncHandler';
 import { getAuthVendor } from '../../shared/utils/AppError';
-import { AuthRequest } from '../../types/index';
+import { AuthRequest }   from '../../types/index';
 
 import {
   RegisterDto,
@@ -12,6 +12,7 @@ import {
   SendOtpDto,
   VerifyOtpDto,
   ForgotPasswordDto,
+  VerifyForgotOtpDto,
   ResetPasswordDto,
   RefreshTokenDto,
   GoogleAuthDto,
@@ -24,7 +25,7 @@ export class AuthController {
   // POST /auth/vendor/register
   public register = asyncHandler(async (req: Request, res: Response): Promise<void> => {
     const result = await authService.register(req.body as RegisterDto);
-    sendCreated(res, result, 'Registration successful. OTP sent to your phone and email.');
+    sendCreated(res, result, 'Registration successful. A verification OTP has been sent to your email.');
   });
 
   // POST /auth/login
@@ -38,12 +39,11 @@ export class AuthController {
   public googleAuth = asyncHandler(async (req: Request, res: Response): Promise<void> => {
     const fcmToken = req.headers['x-fcm-token'] as string | undefined;
     const result   = await authService.googleAuth(req.body as GoogleAuthDto, fcmToken);
-
-    const isNew = result.vendor.requiresOnboarding;
+    const isNew    = result.vendor.requiresOnboarding;
     sendSuccess(
       res,
       result,
-      isNew ? 'Google Sign-Up successful. Please verify your phone.' : 'Google Sign-In successful',
+      isNew ? 'Google Sign-Up successful.' : 'Google Sign-In successful',
       isNew ? 201 : 200,
     );
   });
@@ -51,26 +51,27 @@ export class AuthController {
   // POST /auth/send-otp
   public sendOtp = asyncHandler(async (req: Request, res: Response): Promise<void> => {
     const result = await authService.sendOtp(req.body as SendOtpDto);
-    sendSuccess(res, result, 'OTP sent successfully');
+    sendSuccess(res, result, 'OTP sent to your email');
   });
 
   // POST /auth/verify-otp
   public verifyOtp = asyncHandler(async (req: Request, res: Response): Promise<void> => {
     await authService.verifyOtp(req.body as VerifyOtpDto);
-    sendSuccess(res, null, 'OTP verified successfully');
+    sendSuccess(res, null, 'Email verified successfully');
   });
 
   // POST /auth/forgot-password
   public forgotPassword = asyncHandler(async (req: Request, res: Response): Promise<void> => {
-    const { phone } = req.body as ForgotPasswordDto;
-    await authService.forgotPassword(phone);
-    sendSuccess(res, null, 'If an account exists, an OTP has been sent.');
+    const { email } = req.body as ForgotPasswordDto;
+    await authService.forgotPassword(email);
+    // Always the same message — never reveal whether the email is registered
+    sendSuccess(res, null, 'If an account exists, an OTP has been sent to that email.');
   });
 
   // POST /auth/verify-forgot-otp
   public verifyForgotOtp = asyncHandler(async (req: Request, res: Response): Promise<void> => {
-    const { phone, otp } = req.body as { phone: string; otp: string };
-    const resetToken = await authService.verifyForgotOtp(phone, otp);
+    const { email, otp } = req.body as VerifyForgotOtpDto;
+    const resetToken = await authService.verifyForgotOtp(email, otp);
     sendSuccess(res, { resetToken }, 'OTP verified. Use the reset token to set a new password.');
   });
 
@@ -92,7 +93,6 @@ export class AuthController {
     const { id: vendorId } = getAuthVendor(req);
     const refreshToken     = req.body.refreshToken as string | undefined;
     const fcmToken         = req.headers['x-fcm-token'] as string | undefined;
-
     await authService.logout(vendorId, refreshToken, fcmToken);
     sendSuccess(res, null, 'Logged out successfully');
   });

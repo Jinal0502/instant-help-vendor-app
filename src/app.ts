@@ -13,9 +13,13 @@ import { morganStream } from './logger/index';
 import { errorHandler, notFoundHandler } from './shared/middlewares/errorHandlers';
 
 // ── Route imports ──────────────────────────────────────────
-import authRoutes from './modules/auth/auth.routes';
+import authRoutes        from './modules/auth/auth.routes';
+import onboardingRoutes  from './modules/onboarding/onboarding.routes';
+import kycRoutes         from './modules/kyc/kyc.routes';
 
 const app: Application = express();
+
+app.set('trust proxy', 1);
 
 // ── Request ID — attach before anything else ───────────────
 app.use((req, _res, next) => {
@@ -74,9 +78,10 @@ app.get('/health', (_req, res) => {
 });
 
 // ── API routes ─────────────────────────────────────────────
-app.use('/api/v1/auth', authLimiter, authRoutes);
-// app.use('/api/v1/vendor',        vendorRoutes);
-// app.use('/api/v1/kyc',           kycRoutes);
+app.use('/api/v1/auth',              authLimiter, authRoutes);
+app.use('/api/v1/vendor/onboarding', onboardingRoutes);
+app.use('/api/v1/vendor/kyc',        kycRoutes);
+app.use('/api/v1/vendor/me',         kycRoutes);
 // app.use('/api/v1/jobs',          jobRoutes);
 // app.use('/api/v1/payments',      paymentRoutes);
 // app.use('/api/v1/notifications', notificationRoutes);

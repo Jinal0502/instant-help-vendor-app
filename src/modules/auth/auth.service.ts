@@ -2,19 +2,20 @@ import { randomUUID } from 'crypto';
 import mongoose from 'mongoose';
 
 import { VendorModel, IVendor } from '../../models/vendor.model';
-import { AppError } from '../../shared/utils/AppError';
-import { getRedis } from '../../shared/database/redis';
-import { config } from '../../config/index';
+import { AppError }             from '../../shared/utils/AppError';
+import { getRedis }             from '../../shared/database/redis';
+import { config }               from '../../config/index';
 import {
   signAccessToken,
   signRefreshToken,
   verifyRefreshToken,
   hashToken,
 } from '../../shared/utils/Token';
-import { OtpChannel, OtpService } from '../../shared/services/otp.service';
-import { GoogleService } from '../../shared/services/google.service';
-import { logger } from '../../logger/index';
-import { KycStatus } from '../../types/index';
+import { OtpService }      from '../../shared/services/otp.service';
+import { GoogleService }   from '../../shared/services/google.service';
+import { logger }          from '../../logger/index';
+import { KycStatus }       from '../../types/index';
+import {EmailService}       from '../../shared/services/email.service';
 
 import {
   RegisterDto,
@@ -31,19 +32,19 @@ interface AuthTokens {
   refreshToken: string;
 }
 
-/** Minimal vendor shape returned on login — never the full document */
 interface LoginVendor {
-  id:              string;
-  name:            string;
-  email:           string;
-  phone:           string;
-  username:        string;
-  isPhoneVerified: boolean;
-  isEmailVerified: boolean;
-  kycStatus:       KycStatus;
-  avatar?:         string;
-  authProvider:    string;
-  // true when a new Google user still needs to complete their profile (e.g. add phone)
+  id:                 string;
+  name:               string;
+  email:              string;
+  phone:              string;
+  username:           string;
+  isEmailVerified:    boolean;
+  // Phone verification is disabled — kept for future SMS re-integration
+  // TODO: restore isPhoneVerified to active use when SMS is re-enabled
+  isPhoneVerified:    boolean;
+  kycStatus:          KycStatus;
+  avatar?:            string;
+  authProvider:       string;
   requiresOnboarding: boolean;
 }
 
@@ -62,13 +63,11 @@ export class AuthService {
   // ── Register ─────────────────────────────────────────────
   public async register(dto: RegisterDto): Promise<{
     vendorId: string;
-    phone:    string;
     email:    string;
   }> {
-    let vendor: IVendor;
-
     const username = dto.username ?? `user_${dto.phone.replace(/\D/g, '').slice(-8)}`;
 
+    let vendor: IVendor;
     try {
       vendor = await VendorModel.create({
         username:     username.toLowerCase(),
@@ -104,21 +103,20 @@ export class AuthService {
 
     logger.info('Vendor registered', { vendorId: vendor._id.toString() });
 
-    const otpResults = await Promise.allSettled([
-      OtpService.sendOtp(dto.phone, 'phone'),
-      OtpService.sendOtp(dto.email, 'email'),
-    ]);
+    // Send email OTP only — SMS disabled
+    // TODO: also send phone OTP here when SMS is re-enabled
+    try {
+      await OtpService.sendOtp(dto.email.toLowerCase(), 'email' , 'registration');
 
-    otpResults.forEach((result, i) => {
-      if (result.status === 'rejected') {
-        logger.error(`Failed to send registration OTP via ${i === 0 ? 'phone' : 'email'}`, {
-          reason:   result.reason,
-          vendorId: vendor._id.toString(),
-        });
-      }
-    });
+    } catch (err) {
+      logger.error('Failed to send registration OTP via email', {
+        err,
+        vendorId: vendor._id.toString(),
+      });
+      // Non-fatal — vendor can request OTP again via /send-otp
+    }
 
-    return { vendorId: vendor._id.toString(), phone: dto.phone, email: dto.email };
+    return { vendorId: vendor._id.toString(), email: dto.email };
   }
 
   // ── Login ─────────────────────────────────────────────────
@@ -133,7 +131,6 @@ export class AuthService {
 
     if (!vendor.isActive) throw AppError.forbidden('Account has been deactivated');
 
-    // Google-only accounts have no password — block password login
     if (vendor.authProvider === 'google') {
       throw AppError.badRequest(
         'This account uses Google Sign-In. Please log in with Google.',
@@ -145,22 +142,8 @@ export class AuthService {
   }
 
   // ── Google Auth ───────────────────────────────────────────
-  /**
-   * Handles all three Google auth cases in a single endpoint:
-   *   1. Existing Google user          → login
-   *   2. Existing local user (email)   → link Google account + login
-   *   3. New user                      → create account + login
-   *
-   * Account takeover prevention:
-   *   - Google email must be verified by Google
-   *   - Existing local account is only linked if the email matches exactly
-   *   - A different Google account cannot claim an already-linked googleId
-   */
   public async googleAuth(dto: GoogleAuthDto, fcmToken?: string): Promise<AuthResult> {
-    // ── 1. Verify the token with Google ───────────────────
-    // DEV ONLY: pass idToken as "dev:<email>:<name>" to bypass real Google verification
-    // e.g. { "idToken": "dev:test@gmail.com:Test User" }
-    // This block is completely unreachable in production.
+    // DEV ONLY: bypass real Google verification with "dev:<email>:<name>"
     let profile: Awaited<ReturnType<typeof GoogleService.verifyIdToken>>;
     if (config.isDev && dto.idToken.startsWith('dev:')) {
       const [, email = 'dev@test.com', name = 'Dev User'] = dto.idToken.split(':');
@@ -178,31 +161,27 @@ export class AuthService {
 
     if (!profile.emailVerified) {
       throw AppError.badRequest(
-        'Google account email is not verified. Please verify your Google email first.',
+        'Google account email is not verified.',
         'GOOGLE_EMAIL_UNVERIFIED',
       );
     }
 
-    // ── 2. Look up by googleId first (fastest path) ───────
+    // Case 1: known Google user
     let vendor = await VendorModel.findOne({ googleId: profile.googleId })
       .select('+refreshTokens +fcmTokens');
 
     if (vendor) {
-      // Case 1: known Google user
       if (!vendor.isActive) throw AppError.forbidden('Account has been deactivated');
       return this.finaliseLogin(vendor, fcmToken);
     }
 
-    // ── 3. Look up by email ───────────────────────────────
+    // Case 2: existing local account — link Google
     vendor = await VendorModel.findOne({ email: profile.email })
       .select('+refreshTokens +fcmTokens');
 
     if (vendor) {
-      // Case 2: existing local account with same email
       if (!vendor.isActive) throw AppError.forbidden('Account has been deactivated');
 
-      // Safety: if this account already has a DIFFERENT googleId, reject.
-      // This prevents one Google account from hijacking another vendor's account.
       if (vendor.googleId && vendor.googleId !== profile.googleId) {
         throw AppError.conflict(
           'This email is already linked to a different Google account.',
@@ -210,24 +189,17 @@ export class AuthService {
         );
       }
 
-      // Link Google to the existing local account
-      vendor.googleId      = profile.googleId;
-      vendor.authProvider  = vendor.authProvider === 'local' ? 'both' : vendor.authProvider;
+      vendor.googleId        = profile.googleId;
+      vendor.authProvider    = vendor.authProvider === 'local' ? 'both' : vendor.authProvider;
       vendor.isEmailVerified = true;
-
-      // Only update avatar if the vendor hasn't set one yet
-      if (!vendor.avatar && profile.avatar) {
-        vendor.avatar = profile.avatar;
-      }
+      if (!vendor.avatar && profile.avatar) vendor.avatar = profile.avatar;
 
       await vendor.save();
       logger.info('Google account linked to existing vendor', { vendorId: vendor._id.toString() });
-
       return this.finaliseLogin(vendor, fcmToken);
     }
 
-    // ── 4. New user — create account ──────────────────────
-    // Phone is required for new Google signups (needed for OTP flows later)
+    // Case 3: new user
     if (!dto.phone) {
       throw AppError.badRequest(
         'Phone number is required to complete Google Sign-Up.',
@@ -246,8 +218,8 @@ export class AuthService {
         googleId:        profile.googleId,
         authProvider:    'google',
         avatar:          profile.avatar ?? '',
-        isEmailVerified: true,   // Google already verified the email
-        isPhoneVerified: false,  // phone still needs OTP verification
+        isEmailVerified: true,
+        isPhoneVerified: false,
       });
     } catch (err) {
       if (
@@ -271,78 +243,85 @@ export class AuthService {
     }
 
     logger.info('New vendor created via Google', { vendorId: vendor._id.toString() });
-
-    // Send phone OTP in background — don't block the response
-    OtpService.sendOtp(dto.phone, 'phone').catch(err =>
-      logger.error('Failed to send phone OTP after Google signup', { err }),
-    );
-
+    // TODO: send phone OTP here when SMS is re-enabled
     return this.finaliseLogin(vendor, fcmToken, true);
   }
 
   // ── Send OTP ──────────────────────────────────────────────
-  public async sendOtp(dto: SendOtpDto): Promise<{
-    sentTo:  string;
-    channel: OtpChannel;
-  }> {
-    const channel: OtpChannel = dto.phone ? 'phone' : 'email';
-    const identifier = (dto.phone ?? dto.email)!;
-
-    await OtpService.sendOtp(identifier, channel);
-    logger.info('OTP sent', { channel });
-
-    return {
-      sentTo:  channel === 'phone' ? this.maskPhone(identifier) : this.maskEmail(identifier),
-      channel,
-    };
+  public async sendOtp(dto: SendOtpDto): Promise<{ sentTo: string }> {
+    const email = dto.email!;
+    await OtpService.sendOtp(email, 'email', 'resend');
+    logger.info('OTP sent via email');
+    return { sentTo: this.maskEmail(email) };
   }
 
   // ── Verify OTP ────────────────────────────────────────────
+  /**
+   * Email-only OTP verification.
+   * TODO: restore phone verification when SMS is re-enabled
+   */
   public async verifyOtp(dto: VerifyOtpDto): Promise<void> {
-    const channel: OtpChannel = dto.phone ? 'phone' : 'email';
-    const identifier = (dto.phone ?? dto.email)!;
+    const email = dto.email!;
 
-    await OtpService.verifyOtp(identifier, dto.otp, channel);
+    await OtpService.verifyOtp(email, dto.otp, 'email');
 
-    if (dto.phone) {
-      await VendorModel.updateOne({ phone: dto.phone }, { isPhoneVerified: true });
-      logger.info('Phone verified');
-    } else {
-      await VendorModel.updateOne({ email: dto.email }, { isEmailVerified: true });
-      logger.info('Email verified');
+    const vendor = await VendorModel.findOne({ email: email.toLowerCase() });
+
+    if (!vendor) {
+      // This should never happen — OTP existence implies vendor existence
+      logger.error('OTP verified but no vendor found', { email });
+      throw AppError.notFound('Vendor');
     }
+
+    await VendorModel.updateOne({ email }, { isEmailVerified: true });
+
+    await EmailService.sendWelcomeEmail(vendor.email.toLowerCase(), vendor.name ?? '');
+
+    logger.info('Email verified');
   }
 
   // ── Forgot Password ───────────────────────────────────────
-  public async forgotPassword(phone: string): Promise<void> {
-    const vendor = await VendorModel.findOne({ phone }).lean();
+  /**
+   * Sends a password-reset OTP to the vendor's registered email.
+   * Phone-based forgot password is disabled.
+   * TODO: restore phone channel when SMS is re-enabled
+   */
+  public async forgotPassword(email: string): Promise<void> {
+    const vendor = await VendorModel.findOne({ email: email.toLowerCase() })
+      .select('authProvider')
+      .lean();
 
+    // Constant-time response — never reveal whether the email is registered
     if (!vendor) {
-      await new Promise(resolve => setTimeout(resolve, 300 + Math.random() * 200));
+      await this.constantDelay();
       return;
     }
 
-    // Google-only accounts have no password to reset
+    // Google-only accounts have no password to reset — silent fail
     if (vendor.authProvider === 'google') {
-      // Still return silently — don't reveal auth provider to caller
-      await new Promise(resolve => setTimeout(resolve, 300 + Math.random() * 200));
+      await this.constantDelay();
       return;
     }
 
     try {
-      await OtpService.sendOtp(phone, 'phone');
-      logger.info('Forgot password OTP sent');
+      await OtpService.sendOtp(email.toLowerCase(), 'email', 'password-reset');
+      logger.info('Forgot password OTP sent via email');
     } catch (err) {
+      // Swallow delivery errors — client always gets the same generic response
       logger.error('Failed to send forgot password OTP', { err });
     }
   }
 
   // ── Verify Forgot Password OTP ────────────────────────────
-  public async verifyForgotOtp(phone: string, otp: string): Promise<string> {
-    const vendor = await VendorModel.findOne({ phone }).select('_id authProvider').lean();
+  public async verifyForgotOtp(email: string, otp: string): Promise<string> {
+    const normalised = email.toLowerCase();
+
+    const vendor = await VendorModel.findOne({ email: normalised })
+      .select('authProvider')
+      .lean();
 
     if (!vendor) {
-      await new Promise(resolve => setTimeout(resolve, 300 + Math.random() * 200));
+      await this.constantDelay();
       throw AppError.badRequest('Invalid or expired OTP', 'INVALID_OTP');
     }
 
@@ -353,12 +332,11 @@ export class AuthService {
       );
     }
 
-    await OtpService.verifyOtp(phone, otp, 'phone');
+    await OtpService.verifyOtp(normalised, otp, 'email');
 
     const redis      = getRedis();
     const resetToken = randomUUID();
-
-    await redis.setEx(`reset_token:vendor:${resetToken}`, RESET_TOKEN_TTL, phone);
+    await redis.setEx(`reset_token:vendor:${resetToken}`, RESET_TOKEN_TTL, normalised);
 
     return resetToken;
   }
@@ -367,19 +345,18 @@ export class AuthService {
   public async resetPassword(dto: ResetPasswordDto): Promise<void> {
     const redis    = getRedis();
     const redisKey = `reset_token:vendor:${dto.resetToken}`;
-    const phone    = await redis.get(redisKey);
+    const email    = await redis.get(redisKey);
 
-    if (!phone) {
+    if (!email) {
       throw AppError.badRequest('Reset token expired or invalid', 'RESET_TOKEN_INVALID');
     }
 
-    const vendor = await VendorModel.findOne({ phone }).select('+password +refreshTokens');
+    const vendor = await VendorModel.findOne({ email }).select('+password +refreshTokens');
     if (!vendor) throw AppError.notFound('Vendor');
 
     vendor.password      = dto.newPassword;
     vendor.refreshTokens = [];
 
-    // If this was a Google account that now has a password, upgrade provider
     if (vendor.authProvider === 'google') {
       vendor.authProvider = 'both';
     }
@@ -398,7 +375,7 @@ export class AuthService {
     const vendor = await VendorModel.findById(payload.vendorId)
       .select('+refreshTokens isActive');
 
-    if (!vendor) throw AppError.unauthorized('Vendor not found');
+    if (!vendor)          throw AppError.unauthorized('Vendor not found');
     if (!vendor.isActive) throw AppError.forbidden('Account has been deactivated');
 
     const tokenIndex = (vendor.refreshTokens ?? []).indexOf(hashed);
@@ -451,10 +428,6 @@ export class AuthService {
   }
 
   // ── Private: finalise login ───────────────────────────────
-  /**
-   * Common tail for all login paths — generates tokens, updates DB, returns result.
-   * @param requiresOnboarding  true for brand-new Google signups that still need phone verification
-   */
   private async finaliseLogin(
     vendor:             IVendor,
     fcmToken?:          string,
@@ -475,10 +448,7 @@ export class AuthService {
 
     await vendor.save();
 
-    return {
-      vendor: this.toLoginVendor(vendor, requiresOnboarding),
-      tokens,
-    };
+    return { vendor: this.toLoginVendor(vendor, requiresOnboarding), tokens };
   }
 
   // ── Private: generate tokens ──────────────────────────────
@@ -498,8 +468,8 @@ export class AuthService {
       email:              vendor.email,
       phone:              vendor.phone,
       username:           vendor.username,
-      isPhoneVerified:    vendor.isPhoneVerified,
       isEmailVerified:    vendor.isEmailVerified,
+      isPhoneVerified:    vendor.isPhoneVerified,
       kycStatus:          vendor.kycStatus,
       avatar:             vendor.avatar,
       authProvider:       vendor.authProvider,
@@ -508,12 +478,7 @@ export class AuthService {
   }
 
   // ── Private: generate unique username ─────────────────────
-  /**
-   * Derives a username from the Google display name or email prefix,
-   * then appends a numeric suffix until it's unique in the DB.
-   */
   private async generateUniqueUsername(name: string, email: string): Promise<string> {
-    // Sanitise: lowercase, replace spaces/special chars with underscore, trim to 20 chars
     const base = (name || email.split('@')[0])
       .toLowerCase()
       .replace(/[^a-z0-9]/g, '_')
@@ -521,14 +486,12 @@ export class AuthService {
       .replace(/^_|_$/g, '')
       .slice(0, 20) || 'vendor';
 
-    // Try the base name first, then base_2, base_3 … up to 10 attempts
     for (let attempt = 0; attempt < 10; attempt++) {
       const candidate = attempt === 0 ? base : `${base}_${attempt + 1}`;
       const exists    = await VendorModel.exists({ username: candidate });
       if (!exists) return candidate;
     }
 
-    // Fallback: base + random 6-char suffix — virtually guaranteed unique
     return `${base}_${randomUUID().replace(/-/g, '').slice(0, 6)}`;
   }
 
@@ -541,11 +504,12 @@ export class AuthService {
     }
   }
 
-  // ── Private: masking helpers ──────────────────────────────
-  private maskPhone(phone: string): string {
-    return phone.slice(0, 3) + '****' + phone.slice(-3);
+  // ── Private: constant-time delay (anti-enumeration) ───────
+  private constantDelay(): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, 300 + Math.random() * 200));
   }
 
+  // ── Private: masking helpers ──────────────────────────────
   private maskEmail(email: string): string {
     return email.replace(/(.{2})(.*)(@.*)/, '$1****$3');
   }

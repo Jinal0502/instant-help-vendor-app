@@ -15,15 +15,14 @@ const REQUIRED_VARS = [
   'REDIS_URL',
   'JWT_ACCESS_SECRET',
   'JWT_REFRESH_SECRET',
-  // 'CLOUDINARY_CLOUD_NAME',
-  // 'CLOUDINARY_API_KEY',
-  // 'CLOUDINARY_API_SECRET',
-  'TWILIO_ACCOUNT_SID',
-  'TWILIO_AUTH_TOKEN',
-  'TWILIO_VERIFY_SERVICE_SID',
-//   'FIREBASE_PROJECT_ID',
-//   'FIREBASE_PRIVATE_KEY',
-//   'FIREBASE_CLIENT_EMAIL',
+  'CLOUDINARY_CLOUD_NAME',
+  'CLOUDINARY_API_KEY',
+  'CLOUDINARY_API_SECRET',
+  // Twilio disabled — SMS OTP replaced with email OTP
+  // TODO: restore when SMS is re-enabled
+  // 'TWILIO_ACCOUNT_SID',
+  // 'TWILIO_AUTH_TOKEN',
+  // 'TWILIO_VERIFY_SERVICE_SID',
   'BREVO_API_KEY',
   'MAIL_FROM',
   'ENCRYPTION_KEY',
@@ -61,7 +60,7 @@ export const config = {
   otp: {
     expirySeconds:       parseInt(get('OTP_EXPIRY_SECONDS')        || '600', 10),
     resendLimit:         parseInt(get('OTP_RESEND_LIMIT')           || '3',   10),
-    resendWindowSeconds: parseInt(get('OTP_RESEND_WINDOW_SECONDS')  || '600', 10),
+    resendWindowSeconds: parseInt(get('OTP_RESEND_WINDOW_SECONDS')  || '60', 10),
   },
 
 //   cloudinary: {
@@ -70,10 +69,18 @@ export const config = {
 //     apiSecret: required('CLOUDINARY_API_SECRET'),
 //   },
 
-  twilio: {
-    accountSid:       required('TWILIO_ACCOUNT_SID'),
-    authToken:        required('TWILIO_AUTH_TOKEN'),
-    verifyServiceSid: required('TWILIO_VERIFY_SERVICE_SID'),
+  // Twilio — disabled while SMS OTP is replaced with email OTP
+  // TODO: restore when SMS is re-enabled
+  // twilio: {
+  //   accountSid:       required('TWILIO_ACCOUNT_SID'),
+  //   authToken:        required('TWILIO_AUTH_TOKEN'),
+  //   verifyServiceSid: required('TWILIO_VERIFY_SERVICE_SID'),
+  // },
+
+  cloudinary: {
+    cloudName: required('CLOUDINARY_CLOUD_NAME'),
+    apiKey:    required('CLOUDINARY_API_KEY'),
+    apiSecret: required('CLOUDINARY_API_SECRET'),
   },
 
 //   firebase: {

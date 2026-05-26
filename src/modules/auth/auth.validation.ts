@@ -6,22 +6,31 @@ const strongPass = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[\W_]).{8,64}$/;
 const timeRegex  = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 // ── Reusable field definitions ─────────────────────────────
+// phoneField kept for registration and future SMS re-integration
+// TODO: restore phoneField to OTP schemas when SMS is re-enabled
 const phoneField = z.string().trim().regex(phoneRegex, 'Invalid phone number format');
-const emailField = z.string().trim().email('Invalid email address').transform(v => v.toLowerCase());
+const emailField = z
+  .string()
+  .trim()
+  .email('Invalid email address')
+  .transform(v => v.toLowerCase());
 
-/**
- * Password field — intentionally NO .trim().
- * Trimming passwords silently changes what the user typed.
- */
+// Password — intentionally NO .trim() (trimming silently changes the user's password)
 const passwordField = z
   .string()
   .min(8,  'Password must be at least 8 characters')
   .max(64, 'Password cannot exceed 64 characters')
   .regex(strongPass, 'Password must contain uppercase, lowercase, number and special character');
 
+// ── OTP code field (shared) ────────────────────────────────
+const otpField = z
+  .string()
+  .trim()
+  .length(6, 'OTP must be 6 digits')
+  .regex(/^\d{6}$/, 'OTP must contain only digits');
+
 // ── Register ───────────────────────────────────────────────
 export const RegisterSchema = z.object({
-  // Optional — auto-generated from phone if not provided
   username: z
     .string()
     .trim()
@@ -31,7 +40,6 @@ export const RegisterSchema = z.object({
     .transform(v => v.toLowerCase())
     .optional(),
 
-  // Optional at registration
   name: z
     .string()
     .trim()
@@ -39,12 +47,12 @@ export const RegisterSchema = z.object({
     .max(100, 'Name cannot exceed 100 characters')
     .optional(),
 
+  // Phone kept in registration for future SMS OTP and vendor identity
+  // TODO: make phone optional once SMS is fully removed from onboarding
   phone: phoneField,
   email: emailField,
 
-  password: passwordField,
-
-  // Optional — skip confirm password check if not provided
+  password:        passwordField,
   confirmPassword: z.string().optional(),
 })
 .refine(d => !d.confirmPassword || d.password === d.confirmPassword, {
@@ -60,63 +68,41 @@ export const LoginSchema = z.object({
 })
 .strict();
 
-// ── Send OTP ───────────────────────────────────────────────
+// ── Send OTP — email only ──────────────────────────────────
+// Phone OTP is disabled. Schema simplified to email-only.
+// TODO: restore phone field when SMS is re-enabled
 export const SendOtpSchema = z.object({
-  phone: phoneField.optional(),
-  email: emailField.optional(),
-})
-.refine(d => !!(d.phone || d.email), {
-  message: 'Either phone or email is required',
-  path:    ['phone'],
-})
-.refine(d => !(d.phone && d.email), {
-  message: 'Provide only one — phone or email',
-  path:    ['phone'],
+  email: emailField,
 })
 .strict();
 
-// ── Verify OTP ─────────────────────────────────────────────
+// ── Verify OTP — email only ────────────────────────────────
+// TODO: restore phone field when SMS is re-enabled
 export const VerifyOtpSchema = z.object({
-  phone: phoneField.optional(),
-  email: emailField.optional(),
-
-  otp: z
-    .string()
-    .trim()
-    .length(6, 'OTP must be 6 digits')
-    .regex(/^\d{6}$/, 'OTP must contain only digits'),
-})
-.refine(d => !!(d.phone || d.email), {
-  message: 'Either phone or email is required',
-  path:    ['phone'],
-})
-.refine(d => !(d.phone && d.email), {
-  message: 'Provide only one — phone or email',
-  path:    ['phone'],
+  email: emailField,
+  otp:   otpField,
 })
 .strict();
 
-// ── Forgot Password ────────────────────────────────────────
+// ── Forgot Password — email only ───────────────────────────
+// Phone-based forgot password is disabled.
+// TODO: restore phone field when SMS is re-enabled
 export const ForgotPasswordSchema = z.object({
-  phone: phoneField,
+  email: emailField,
 })
 .strict();
 
-// ── Verify Forgot Password OTP ─────────────────────────────
+// ── Verify Forgot Password OTP — email only ────────────────
+// TODO: restore phone field when SMS is re-enabled
 export const VerifyForgotOtpSchema = z.object({
-  phone: phoneField,
-  otp: z
-    .string()
-    .trim()
-    .length(6, 'OTP must be 6 digits')
-    .regex(/^\d{6}$/, 'OTP must contain only digits'),
+  email: emailField,
+  otp:   otpField,
 })
 .strict();
 
 // ── Reset Password ─────────────────────────────────────────
 export const ResetPasswordSchema = z.object({
-  resetToken: z.string().trim().min(1, 'Reset token is required'),
-
+  resetToken:      z.string().trim().min(1, 'Reset token is required'),
   newPassword:     passwordField,
   confirmPassword: z.string().min(1, 'Confirm password is required'),
 })
@@ -134,17 +120,8 @@ export const RefreshTokenSchema = z.object({
 
 // ── Google Auth ────────────────────────────────────────────
 export const GoogleAuthSchema = z.object({
-  // The idToken from Google Sign-In SDK on Android / iOS
-  idToken: z.string().trim().min(1, 'Google ID token is required'),
-
-  // Phone is required for new Google signups — not needed for existing accounts
-  phone: z
-    .string()
-    .trim()
-    .regex(phoneRegex, 'Invalid phone number format')
-    .optional(),
-
-  // Optional FCM token for push notifications
+  idToken:  z.string().trim().min(1, 'Google ID token is required'),
+  phone:    phoneField.optional(),
   fcmToken: z.string().trim().min(1).optional(),
 })
 .strict();
@@ -162,13 +139,13 @@ export const TimeStringSchema = z
   .regex(timeRegex, 'Time must be in HH:MM format (e.g. 09:00)');
 
 // ── DTO types ──────────────────────────────────────────────
-export type RegisterDto      = z.infer<typeof RegisterSchema>;
-export type LoginDto         = z.infer<typeof LoginSchema>;
-export type SendOtpDto       = z.infer<typeof SendOtpSchema>;
-export type VerifyOtpDto     = z.infer<typeof VerifyOtpSchema>;
-export type ForgotPasswordDto    = z.infer<typeof ForgotPasswordSchema>;
-export type VerifyForgotOtpDto   = z.infer<typeof VerifyForgotOtpSchema>;
-export type ResetPasswordDto = z.infer<typeof ResetPasswordSchema>;
-export type RefreshTokenDto  = z.infer<typeof RefreshTokenSchema>;
-export type FcmTokenDto      = z.infer<typeof FcmTokenSchema>;
-export type GoogleAuthDto    = z.infer<typeof GoogleAuthSchema>;
+export type RegisterDto        = z.infer<typeof RegisterSchema>;
+export type LoginDto           = z.infer<typeof LoginSchema>;
+export type SendOtpDto         = z.infer<typeof SendOtpSchema>;
+export type VerifyOtpDto       = z.infer<typeof VerifyOtpSchema>;
+export type ForgotPasswordDto  = z.infer<typeof ForgotPasswordSchema>;
+export type VerifyForgotOtpDto = z.infer<typeof VerifyForgotOtpSchema>;
+export type ResetPasswordDto   = z.infer<typeof ResetPasswordSchema>;
+export type RefreshTokenDto    = z.infer<typeof RefreshTokenSchema>;
+export type FcmTokenDto        = z.infer<typeof FcmTokenSchema>;
+export type GoogleAuthDto      = z.infer<typeof GoogleAuthSchema>;

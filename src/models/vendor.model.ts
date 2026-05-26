@@ -62,6 +62,8 @@ export interface IVendor extends Document {
     logoUrl?:         string;
     yearsInBusiness?: number;
     pricing?:         number;
+    workingStart?:    string;  // "HH:MM"
+    workingEnd?:      string;  // "HH:MM"
   };
 
   // Availability
@@ -69,10 +71,11 @@ export interface IVendor extends Document {
   nightShift:   NightShift;
 
   // Stats
-  rating:         number;
-  totalRatings:   number;
-  totalJobsDone:  number;
-  completionRate: number;
+  rating:               number;
+  totalRatings:         number;
+  totalJobsDone:        number;
+  completionRate:       number;
+  onboardingCompleted:  boolean;
 
   // Tokens (select: false — never returned by default)
   refreshTokens: string[];
@@ -195,6 +198,8 @@ const VendorSchema = new Schema<IVendor>(
       logoUrl:         { type: String },
       yearsInBusiness: { type: Number },
       pricing:         { type: Number },
+      workingStart:    { type: String, match: /^([01]\d|2[0-3]):[0-5]\d$/ },
+      workingEnd:      { type: String, match: /^([01]\d|2[0-3]):[0-5]\d$/ },
     },
 
     // Availability
@@ -202,10 +207,11 @@ const VendorSchema = new Schema<IVendor>(
     nightShift:   { type: NightShiftSchema, default: () => ({ enabled: false }) },
 
     // Stats
-    rating:         { type: Number, default: 0, min: 0, max: 5 },
-    totalRatings:   { type: Number, default: 0 },
-    totalJobsDone:  { type: Number, default: 0 },
-    completionRate: { type: Number, default: 0 },
+    rating:              { type: Number, default: 0, min: 0, max: 5 },
+    totalRatings:        { type: Number, default: 0 },
+    totalJobsDone:       { type: Number, default: 0 },
+    completionRate:      { type: Number, default: 0 },
+    onboardingCompleted: { type: Boolean, default: false },
 
     // Tokens — never returned by default
     refreshTokens: { type: [String], default: [], select: false },
